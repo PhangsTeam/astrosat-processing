@@ -24,7 +24,7 @@ from scipy import ndimage as nd
 
 repo_path = Path(os.path.expanduser("~/ownCloud/observing_code/PHANGS/astrosat-processing"))
 
-filt_tab = Table.read(repo_path / "astrostat_filters.csv")
+filt_tab = Table.read(repo_path / "astrosat_filters.csv")
 phangs_tab = Table.read(repo_path.parent / "phangs_sample.csv")
 
 def cts_to_flux_factor(hdu, filename):
