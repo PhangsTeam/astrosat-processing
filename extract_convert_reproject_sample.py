@@ -18,7 +18,7 @@ from astropy.wcs import WCS
 from astropy.wcs.utils import proj_plane_pixel_scales
 import astropy.units as u
 from datetime import datetime
-from reproject import reproject_interp
+from reproject import reproject_interp, reproject_adaptive
 from spectral_cube import Projection
 from scipy import ndimage as nd
 
@@ -26,6 +26,12 @@ repo_path = Path(os.path.expanduser("~/ownCloud/observing_code/PHANGS/astrosat-p
 
 filt_tab = Table.read(repo_path / "astrosat_filters.csv")
 phangs_tab = Table.read(repo_path.parent / "phangs_sample.csv")
+
+phangs_targets = list(phangs_tab['Name'])
+# Add a few to the list by-hand
+phangs_targets.extend(['NGC0300'])
+
+lg_targets = ['NGC0224', 'NGC0598', 'NGC6822', 'WLM']
 
 def cts_to_flux_factor(hdu, filename):
     '''
@@ -95,7 +101,7 @@ def cts_to_flux_factor(hdu, filename):
     return hdu_in_flux, metadata
 
 
-def reproject_data(hdu, trim_shape=True, verbose=False):
+def reproject_data(hdu, trim_shape=True, verbose=False, use_adaptive=True):
 
     mywcs = WCS(hdu.header)
 
@@ -113,8 +119,20 @@ def reproject_data(hdu, trim_shape=True, verbose=False):
     new_header['CDELT1'] = -sq_pix_scale
     new_header['CDELT2'] = sq_pix_scale
 
+
+    # The CRPIX isn't always in the middle. Set it in the middle so
+    # reversing CDELT1 doesn't change the sky limits
+    new_header['CRPIX1'] = hdu.header['NAXIS1'] // 2
+    new_header['CRPIX2'] = hdu.header['NAXIS2'] // 2
+
+    centre_deg = mywcs.array_index_to_world_values([[new_header['CRPIX1'],
+                                                     new_header['CRPIX2']]])[0]
+
+    new_header['CRVAL1'] = centre_deg[0]
+    new_header['CRVAL2'] = centre_deg[1]
+
     # Flipping RA, so adjust the CRPIX
-    new_header['CRPIX1'] = hdu.data.shape[0] - hdu.header['CRPIX1']
+    # new_header['CRPIX1'] = hdu.data.shape[0] - hdu.header['CRPIX1']
 
     # Shape params
     new_header['NAXIS'] = hdu.header['NAXIS']
@@ -157,7 +175,10 @@ def reproject_data(hdu, trim_shape=True, verbose=False):
     if 'MJD-OBS' in new_header:
         del new_header['MJD-OBS']
 
-    rep_data, footprint = reproject_interp(hdu, new_header, order='bilinear')
+    if use_adaptive:
+        rep_data, footprint = reproject_adaptive(hdu, new_header, order='nearest-neighbor')
+    else:
+        rep_data, footprint = reproject_interp(hdu, new_header, order='nearest-neighbor')
 
     rep_hdu = fits.PrimaryHDU(rep_data, new_header)
 
@@ -193,12 +214,21 @@ if __name__ == "__main__":
     if not lg_product_path.exists():
         lg_product_path.mkdir()
 
+    other_product_path = product_path / "other"
+    if not other_product_path.exists():
+        other_product_path.mkdir()
+
+
     # Record which filters each target has for an output table.
     data_filter_dict = {}
     for filtname in filt_tab['filter_name']:
         data_filter_dict[filtname] = []
 
     target_list = []
+
+    failure_cases = []
+
+    out_paths = []
 
     # Grab all directories
     for zip_filename in data_path.glob("**/*.zip"):
@@ -208,20 +238,31 @@ if __name__ == "__main__":
         # Extract to the same folder
         out_path = zip_filename.parent
 
+        with zipfile.ZipFile(zip_filename, 'r') as zip_ref:
+            zip_ref.extractall(out_path)
+
+        out_paths.append(out_path)
+
+    out_paths = list(set(out_paths))
+
+    for out_path in out_paths:
+
+        print(f"Running frames of {out_path}")
+
         # Folders have the right names. Processed FITS files may not
         # if the original target does not match.
         target_name = out_path.name
 
         # Is this a PHANGS target?
-        is_phangs = target_name.replace('_', '') in phangs_tab['Name']
+        is_phangs = target_name.replace('_', '') in phangs_targets
+        is_lg = target_name.replace('_', '') in lg_targets
 
         if is_phangs:
             print("This is a PHANGS target.")
-        else:
+        elif is_lg:
             print("This is a LG target.")
-
-        with zipfile.ZipFile(zip_filename, 'r') as zip_ref:
-            zip_ref.extractall(out_path)
+        else:
+            print("This is a an additional target.")
 
         # Loop through the resulting FITS files and move to a common naming
         # format.
@@ -236,33 +277,52 @@ if __name__ == "__main__":
 
             orig_target, band, filt = fits_file.name.split("_")[:3]
 
-            with fits.open(fits_file) as hdulist:
+            # Group all failures together.
+            try:
 
-                if len(hdulist) > 1:
-                    raise ValueError(f"{fits_file} has >1 extension. Check this.")
+                with fits.open(fits_file) as hdulist:
 
-                hdu = hdulist[0]
+                    if len(hdulist) > 1:
+                        raise ValueError(f"{fits_file} has >1 extension. Check this.")
 
-                # Flux conversion and identify filter
-                hdu_in_flux, metadata = cts_to_flux_factor(hdu, fits_file)
+                    hdu = hdulist[0]
 
-                target_filter_dict[metadata['filtername']] = True
+                    # Flux conversion and identify filter
+                    hdu_in_flux, metadata = cts_to_flux_factor(hdu, fits_file)
 
-                # Reprojection
-                print("Reprojecting")
-                rep_hdu = reproject_data(hdu_in_flux, trim_shape=True, verbose=False)
+                    target_filter_dict[metadata['filtername']] = True
+
+                    # Reprojection
+                    print("Reprojecting")
+                    rep_hdu = reproject_data(hdu_in_flux, trim_shape=True,
+                                             verbose=False, use_adaptive=True)
+
+            except Exception as e:
+                failure_cases.append([fits_file, e])
+                continue
 
             # Save to the right output
-            out_name = f"{target_name.replace('_', '')}_{band}_{metadata['filtername']}_flux_reproj.fits"
+            # But M31 has multiple fields. So keep the original names.
+            if target_name == "NGC_0224":
+                out_name = f"{orig_target.replace('.', '')}_{metadata['band']}_{metadata['filtername']}_flux_reproj.fits"
+            else:
+                out_name = f"{target_name.replace('_', '')}_{metadata['band']}_{metadata['filtername']}_flux_reproj.fits"
 
             if is_phangs:
                 this_product_path = phangs_product_path
-            else:
+            elif is_lg:
                 this_product_path = lg_product_path
+            else:
+                this_product_path = other_product_path
 
             out_rep_path = this_product_path / target_name.replace('_', '')
             if not out_rep_path.exists():
                 out_rep_path.mkdir()
+
+            if (out_rep_path / out_name).exists():
+                out_name = f"{out_name.rstrip('.fits')}_2.fits"
+
+            print(f"Saving {out_name}")
 
             rep_hdu.writeto(out_rep_path / out_name, overwrite=True)
 
@@ -274,6 +334,12 @@ if __name__ == "__main__":
 
         target_list.append(target_name)
 
+    data_filter_dict['Name'] = target_list
 
-    tab_has_data = Table(data_filter_dict, names=target_list)
+    tab_has_data = Table(data_filter_dict)
     tab_has_data.write(repo_path / "astrosat_filter_coverage.csv")
+
+    # Check where we had failures:
+    print("Here are the failed cases:")
+    for fail in failure_cases:
+        print(fail)
