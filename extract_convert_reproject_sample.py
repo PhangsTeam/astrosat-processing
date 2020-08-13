@@ -228,9 +228,6 @@ if __name__ == "__main__":
 
     failure_cases = []
 
-    out_paths = []
-
-    # Grab all directories
     for zip_filename in data_path.glob("**/*.zip"):
 
         print(f"Extracting {zip_filename}")
@@ -241,11 +238,11 @@ if __name__ == "__main__":
         with zipfile.ZipFile(zip_filename, 'r') as zip_ref:
             zip_ref.extractall(out_path)
 
-        out_paths.append(out_path)
+    for out_path in data_path.iterdir():
 
-    out_paths = list(set(out_paths))
-
-    for out_path in out_paths:
+        # if out_path.name not in ['NGC_1300', 'IC5332', 'NGC_4654', 'NGC_7496', 'NGC2835']:
+        #     print(f"Skipping {out_path.name}")
+        #     continue
 
         print(f"Running frames of {out_path}")
 
