@@ -15,12 +15,13 @@ import numpy as np
 from astropy.table import Table
 from astropy.io import fits
 from astropy.wcs import WCS
-from astropy.wcs.utils import proj_plane_pixel_scales
+from astropy.wcs.utils import proj_plane_pixel_scales, proj_plane_pixel_area
 import astropy.units as u
 from datetime import datetime
-from reproject import reproject_interp, reproject_adaptive
+from reproject import reproject_interp, reproject_adaptive, reproject_exact
 from spectral_cube import Projection
 from scipy import ndimage as nd
+import warnings
 
 repo_path = Path(os.path.expanduser("~/ownCloud/observing_code/PHANGS/astrosat-processing"))
 
@@ -101,7 +102,8 @@ def cts_to_flux_factor(hdu, filename):
     return hdu_in_flux, metadata
 
 
-def reproject_data(hdu, trim_shape=True, verbose=False, use_adaptive=True):
+def reproject_data(hdu, trim_shape=True, verbose=False, method='exact',
+                   nproc=4):
 
     mywcs = WCS(hdu.header)
 
@@ -175,7 +177,9 @@ def reproject_data(hdu, trim_shape=True, verbose=False, use_adaptive=True):
     if 'MJD-OBS' in new_header:
         del new_header['MJD-OBS']
 
-    if use_adaptive:
+    if method == 'exact':
+        rep_data, footprint = reproject_exact(hdu, new_header, parallel=nproc)
+    elif 'adaptive':
         rep_data, footprint = reproject_adaptive(hdu, new_header, order='nearest-neighbor')
     else:
         rep_data, footprint = reproject_interp(hdu, new_header, order='nearest-neighbor')
@@ -219,6 +223,9 @@ if __name__ == "__main__":
         other_product_path.mkdir()
 
 
+    overwrite = False
+
+
     # Record which filters each target has for an output table.
     data_filter_dict = {}
     for filtname in filt_tab['filter_name']:
@@ -228,15 +235,15 @@ if __name__ == "__main__":
 
     failure_cases = []
 
-    for zip_filename in data_path.glob("**/*.zip"):
+    # for zip_filename in data_path.glob("**/*.zip"):
 
-        print(f"Extracting {zip_filename}")
+    #     print(f"Extracting {zip_filename}")
 
-        # Extract to the same folder
-        out_path = zip_filename.parent
+    #     # Extract to the same folder
+    #     out_path = zip_filename.parent
 
-        with zipfile.ZipFile(zip_filename, 'r') as zip_ref:
-            zip_ref.extractall(out_path)
+    #     with zipfile.ZipFile(zip_filename, 'r') as zip_ref:
+    #         zip_ref.extractall(out_path)
 
     for out_path in data_path.iterdir():
 
@@ -268,62 +275,85 @@ if __name__ == "__main__":
         for filt in filt_tab['filter_name']:
             target_filter_dict[filt] = False
 
-        for fits_file in out_path.glob("*.fits"):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', category=fits.verify.VerifyWarning)
 
-            # Get out properties from the name
+            for fits_file in out_path.glob("*.fits"):
 
-            orig_target, band, filt = fits_file.name.split("_")[:3]
+                # Get out properties from the name
 
-            # Group all failures together.
-            try:
+                orig_target, band, filt = fits_file.name.split("_")[:3]
 
-                with fits.open(fits_file) as hdulist:
+                # Group all failures together.
+                try:
 
-                    if len(hdulist) > 1:
-                        raise ValueError(f"{fits_file} has >1 extension. Check this.")
+                    with fits.open(fits_file) as hdulist:
 
-                    hdu = hdulist[0]
+                        if len(hdulist) > 1:
+                            raise ValueError(f"{fits_file} has >1 extension. Check this.")
 
-                    # Flux conversion and identify filter
-                    hdu_in_flux, metadata = cts_to_flux_factor(hdu, fits_file)
+                        hdu = hdulist[0]
 
-                    target_filter_dict[metadata['filtername']] = True
+                        # Flux conversion and identify filter
+                        hdu_in_flux, metadata = cts_to_flux_factor(hdu, fits_file)
 
-                    # Reprojection
-                    print("Reprojecting")
-                    rep_hdu = reproject_data(hdu_in_flux, trim_shape=True,
-                                             verbose=False, use_adaptive=True)
+                        target_filter_dict[metadata['filtername']] = True
 
-            except Exception as e:
-                failure_cases.append([fits_file, e])
-                continue
+                        # Reprojection
+                        print("Reprojecting")
+                        rep_hdu = reproject_data(hdu_in_flux,
+                                                 trim_shape=True,
+                                                 verbose=False,
+                                                 #  method='exact',
+                                                 method='adaptive',
+                                                 nproc=5)
 
-            # Save to the right output
-            # But M31 has multiple fields. So keep the original names.
-            if target_name == "NGC_0224":
-                out_name = f"{orig_target.replace('.', '')}_{metadata['band']}_{metadata['filtername']}_flux_reproj.fits"
-            else:
-                out_name = f"{target_name.replace('_', '')}_{metadata['band']}_{metadata['filtername']}_flux_reproj.fits"
+                        init_flux = np.nansum(hdu_in_flux.data) * proj_plane_pixel_area(WCS(hdu_in_flux.header))
 
-            if is_phangs:
-                this_product_path = phangs_product_path
-            elif is_lg:
-                this_product_path = lg_product_path
-            else:
-                this_product_path = other_product_path
+                        out_flux = np.nansum(rep_hdu.data) * proj_plane_pixel_area(WCS(rep_hdu.header))
 
-            out_rep_path = this_product_path / target_name.replace('_', '')
-            if not out_rep_path.exists():
-                out_rep_path.mkdir()
+                        perc_change = 100 * (out_flux - init_flux) / init_flux
 
-            if (out_rep_path / out_name).exists():
-                out_name = f"{out_name.rstrip('.fits')}_2.fits"
+                        print(f"Comparing flux before ({init_flux}) and after ({out_flux})")
+                        print(f"Percent change in flux: {perc_change}")
 
-            print(f"Saving {out_name}")
+                        if perc_change > 1e-1:
+                            raise ValueError("Flux varies by >0.1% after reprojection. Check output.")
 
-            rep_hdu.writeto(out_rep_path / out_name, overwrite=True)
+                except Exception as e:
+                    failure_cases.append([fits_file, e])
+                    continue
 
-            del hdu_in_flux, rep_hdu
+                # Save to the right output
+                # But M31 has multiple fields. So keep the original names.
+                if target_name == "NGC_0224":
+                    out_name = f"{orig_target.replace('.', '')}_{metadata['band']}_{metadata['filtername']}_flux_reproj.fits"
+                else:
+                    out_name = f"{target_name.replace('_', '')}_{metadata['band']}_{metadata['filtername']}_flux_reproj.fits"
+
+                if is_phangs:
+                    this_product_path = phangs_product_path
+                elif is_lg:
+                    this_product_path = lg_product_path
+                else:
+                    this_product_path = other_product_path
+
+                out_rep_path = this_product_path / target_name.replace('_', '')
+                if not out_rep_path.exists():
+                    out_rep_path.mkdir()
+
+                if (out_rep_path / out_name).exists():
+                    out_name = f"{out_name.rstrip('.fits')}_2.fits"
+
+                print(f"Saving {out_name}")
+
+                if not overwrite:
+                    if (out_rep_path / out_name).exists():
+                        os.system(f"rm {out_rep_path / out_name}")
+
+                rep_hdu.writeto(out_rep_path / out_name, overwrite=overwrite)
+
+                del hdu_in_flux, rep_hdu
 
         # Append filter matches to the master dict
         for key in target_filter_dict:
