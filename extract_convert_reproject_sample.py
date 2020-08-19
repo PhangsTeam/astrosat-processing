@@ -235,15 +235,15 @@ if __name__ == "__main__":
 
     failure_cases = []
 
-    # for zip_filename in data_path.glob("**/*.zip"):
+    for zip_filename in data_path.glob("**/*.zip"):
 
-    #     print(f"Extracting {zip_filename}")
+        print(f"Extracting {zip_filename}")
 
-    #     # Extract to the same folder
-    #     out_path = zip_filename.parent
+        # Extract to the same folder
+        out_path = zip_filename.parent
 
-    #     with zipfile.ZipFile(zip_filename, 'r') as zip_ref:
-    #         zip_ref.extractall(out_path)
+        with zipfile.ZipFile(zip_filename, 'r') as zip_ref:
+            zip_ref.extractall(out_path)
 
     for out_path in data_path.iterdir():
 
