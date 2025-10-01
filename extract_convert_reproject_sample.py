@@ -180,7 +180,9 @@ def reproject_data(hdu, trim_shape=True, verbose=False, method='exact',
     if method == 'exact':
         rep_data, footprint = reproject_exact(hdu, new_header, parallel=nproc)
     elif method == 'adaptive':
-        rep_data, footprint = reproject_adaptive(hdu, new_header, order='nearest-neighbor')
+        # Updated versions of reproject have dropped the "order" kwarg for adaptive reprojection
+        rep_data, footprint = reproject_adaptive(hdu, new_header)
+        # rep_data, footprint = reproject_adaptive(hdu, new_header, order='nearest-neighbor')
     else:
         rep_data, footprint = reproject_interp(hdu, new_header, order='nearest-neighbor')
 
